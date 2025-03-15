@@ -6,8 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics
 from monai import losses
-from monai.metrics import HausdorffDistanceMetric
-# from monai.losses import HausdorffDTLoss, BoundaryLoss
+from monai.metrics.hausdorff_distance import HausdorffDistanceMetric
 
 ''' for:
 
@@ -60,7 +59,7 @@ class DiceLoss(nn.Module):
 class DiceCELoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self._loss = losses.DiceCELoss(to_onehot_y=False, sigmoid=True)
+        self._loss = losses.DiceCELoss(to_onehot_y=False, softmax=True)
 
     def forward(self, predicted, target):
         loss = self._loss(predicted, target)
@@ -161,14 +160,21 @@ class bbIoU(nn.Module):
     Computes the Intersection over Union (IoU) for predicted and target bounding boxes.
     The bounding boxes are derived by thresholding the 3D input tensors.
     """
-    def __init__(self, threshold=0.5):
+    def __init__(self, mode='binary' ,threshold=0.5):
         super(bbIoU, self).__init__()
+        self.mode = mode
         self.threshold = threshold
 
     def forward(self, pred, target):
         batch_size = pred.size(0)
         iou_sum = 0.0
-        pred = F.sigmoid(pred)
+        
+        # Apply activation based on mode
+        if self.mode == 'binary':
+            pred = torch.sigmoid(pred)
+        else:
+            pred = F.softmax(pred, dim=1)
+
         for i in range(batch_size):
             pred_bbox = self.extract_bbox(pred[i] > self.threshold)
             target_bbox = self.extract_bbox(target[i] > self.threshold)
@@ -206,42 +212,53 @@ class bbIoU(nn.Module):
 
 ###########################################################################
 class SSIM(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='binary'):
         super().__init__()
+        self.mode = mode
         self._loss = losses.SSIMLoss(spatial_dims=3, data_range=1, reduction='mean')
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = self._loss(predicted, target)
         return loss
 
 
 ###########################################################################
 class PSNR(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='binary'):
         super().__init__()
+        self.mode = mode
         self._loss = torchmetrics.PeakSignalNoiseRatio(data_range=(0, 1), dim=1)
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = self._loss(predicted, target)
         if torch.isinf(loss):
-            loss = torch.tensor(100.0) # capping for psnr
+            loss = torch.tensor(100.0)
         return loss
 
 
 ###########################################################################
 class RMSE(nn.Module):
-    def __init__(self, eps=1e-6):
+    def __init__(self, mode='binary', eps=1e-6):
         super().__init__()
+        self.mode = mode
         self._loss = nn.MSELoss(reduction='mean')
         self.eps = eps
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = torch.sqrt(self._loss(predicted, target) + self.eps)
         return loss
-
 
 ###########################################################################
 class KLDiv(nn.Module):
@@ -258,47 +275,69 @@ class KLDiv(nn.Module):
 
 ###########################################################################
 class F1Score(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass', num_classes=26):
         super().__init__()
-        self._loss = torchmetrics.F1Score(task='binary')
+        self.mode = mode
+        self._f1 = F1Score(task=mode, num_classes=num_classes)
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
-        loss = self._loss(predicted, target)
-        return loss
-
+        if self.mode == 'binary':
+            predicted_probs = torch.sigmoid(predicted)
+            target_labels = torch.round(target).long()
+        else:
+            predicted_probs = F.softmax(predicted, dim=1)
+            target_labels = torch.argmax(target, dim=1)
+        f1 = self._f1(predicted_probs, target_labels)
+        return f1
 
 ###########################################################################
 class Recall(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass', num_classes=26):
         super().__init__()
-        self._loss = torchmetrics.Recall(task='binary')
+        self.mode = mode
+        self._recall = Recall(task=mode, num_classes=num_classes)
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
-        loss = self._loss(predicted, target)
-        return loss
+        if self.mode == 'binary':
+            predicted_probs = torch.sigmoid(predicted)
+            target_labels = torch.round(target).long()
+        else:
+            predicted_probs = F.softmax(predicted, dim=1)
+            target_labels = torch.argmax(target, dim=1)
+        recall = self._recall(predicted_probs, target_labels)
+        return recall
 
 
 ###########################################################################
 class Precision(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass', num_classes=26):
         super().__init__()
-        self._loss = torchmetrics.Precision(task='binary')
+        self.mode = mode
+        self._precision = Precision(task=mode, num_classes=num_classes)
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
-        loss = self._loss(predicted, target)
-        return loss
+        if self.mode == 'binary':
+            predicted_probs = torch.sigmoid(predicted)
+            target_labels = torch.round(target).long()
+        else:
+            predicted_probs = F.softmax(predicted, dim=1)
+            target_labels = torch.argmax(target, dim=1)
+        precision = self._precision(predicted_probs, target_labels)
+        return precision
 
 
 ###########################################################################
 class HausdorffDTLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='binary'):
         super().__init__()
-        self._loss = losses.HausdorffDTLoss(sigmoid=True, reduction='mean')
+        self.mode = mode
+        self._loss = HausdorffDTLoss(sigmoid=(mode == 'binary'), reduction='mean')
 
     def forward(self, predicted, target):
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = self._loss(predicted, target)
         return loss
 
@@ -327,36 +366,50 @@ class HausdorffMetric(nn.Module):
 
 ###########################################################################
 class Jaccard(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass', num_classes=26):
         super().__init__()
-        self._loss = torchmetrics.JaccardIndex(task='binary')
+        self.mode = mode
+        self._jaccard = JaccardIndex(task=mode, num_classes=num_classes)
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
-        loss = self._loss(predicted, target)
-        return loss
+        if self.mode == 'binary':
+            predicted_probs = torch.sigmoid(predicted)
+            target_labels = torch.round(target).long()
+        else:
+            predicted_probs = F.softmax(predicted, dim=1)
+            target_labels = torch.argmax(target, dim=1)
+        jaccard = self._jaccard(predicted_probs, target_labels)
+        return jaccard
 
 
 ###########################################################################
 class MAE(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass'):
         super().__init__()
+        self.mode = mode
         self._loss = nn.L1Loss(reduction='mean')
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = self._loss(predicted, target)
         return loss
 
 
 ###########################################################################
 class R2(nn.Module):
-    def __init__(self):
+    def __init__(self, mode='multiclass'):
         super().__init__()
+        self.mode = mode
         self._loss = torchmetrics.R2Score()
 
     def forward(self, predicted, target):
-        predicted = F.sigmoid(predicted)
+        if self.mode == 'binary':
+            predicted = torch.sigmoid(predicted)
+        else:
+            predicted = F.softmax(predicted, dim=1)
         loss = self._loss(predicted.flatten(), target.flatten())
         return loss
 
@@ -471,3 +524,48 @@ class FocalLoss(nn.Module):
         if self.size_average:
             return loss.mean()
         return loss.sum()
+    
+    
+###########################################################################
+class MulticlassHausdorff(nn.Module):
+    def __init__(self, num_classes=26):
+        super().__init__()
+        self.num_classes = num_classes
+        self._metric = HausdorffDistanceMetric(
+            include_background=True,
+            percentile=95
+        )
+
+    def forward(self, predicted, target):
+        predicted = F.softmax(predicted, dim=1)
+        predicted_labels = torch.argmax(predicted, dim=1)
+        target_labels = torch.argmax(target, dim=1)
+        
+        batch_size = predicted.size(0)
+        hausdorff_distances = []
+        
+        for b in range(batch_size):
+            class_distances = []
+            present_classes = torch.unique(target_labels[b])
+            
+            for c in present_classes:
+                pred_binary = (predicted_labels[b] == c).float()
+                target_binary = (target_labels[b] == c).float()
+                
+                if pred_binary.ndim == 3:
+                    pred_binary = pred_binary.unsqueeze(0).unsqueeze(1)
+                    target_binary = target_binary.unsqueeze(0).unsqueeze(1)
+                elif pred_binary.ndim == 4:
+                    pred_binary = pred_binary.unsqueeze(1)
+                    target_binary = target_binary.unsqueeze(1)
+                
+                distance = self._metric(pred_binary, target_binary)
+                class_distances.append(distance)
+            
+            if class_distances:
+                hausdorff_distances.append(torch.stack(class_distances).mean())
+        
+        if not hausdorff_distances:
+            return torch.tensor(float('inf')).to(predicted.device)
+            
+        return torch.stack(hausdorff_distances).mean()
